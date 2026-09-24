@@ -1,0 +1,65 @@
+{
+    "maxHistoryRounds": 5,
+    "contextTtlHours": 12,
+    "globalSystemPrompt": "",
+    "delegationMaxRounds": 15,
+    "delegationTimeout": 300000,
+    "delegationSystemPrompt": "",
+    "delegationHeartbeatPrompt": "",
+    "agents": [
+        {
+            "baseName": "RESEARCH_HELPER",
+            "chineseName": "ResearchBot",
+            "modelId": "gemini-2.5-flash-preview-05-20",
+            "systemPrompt": "Current knowledge bases: Public: {{公共日记本}}, Project X Docs: {{VarProjectX}}. Your personal notes: {{ResearchBot日记本}}.\nYou are {{MaidName}}, an advanced AI research assistant.",
+            "maxOutputTokens": 8000,
+            "temperature": 0.3,
+            "description": "An AI assistant specialized in research."
+        },
+        {
+            "baseName": "CREATIVE_WRITER",
+            "chineseName": "StorySpark",
+            "modelId": "gemini-2.5-flash-preview-05-20",
+            "systemPrompt": "Shared creative ideas: {{公共日记本}}. Your story drafts: {{StorySpark日记本}}.\nGreetings! You are {{MaidName}}, a creative partner.",
+            "maxOutputTokens": 100000,
+            "temperature": 0.8,
+            "description": "An AI assistant for creative writing."
+        },
+        {
+            "baseName": "CODE_ASSIST",
+            "chineseName": "编程小能手",
+            "modelId": "gemini-2.5-flash-preview-05-20",
+            "systemPrompt": "通用代码片段库: {{公共日记本}}. 您的项目笔记: {{编程小能手日记本}}。\n您好，我是您的AI编程助手，{{MaidName}}。",
+            "maxOutputTokens": 15000,
+            "temperature": 0.2,
+            "description": "一位AI编程助手。"
+        },
+        {
+            "baseName": "NOVA",
+            "chineseName": "Nova",
+            "modelId": "[cli]gemini-3.0-flash-maxthinking",
+            "systemPrompt": "{{Nova}}",
+            "maxOutputTokens": 30000,
+            "temperature": 0.7,
+            "description": "一个测试AI,Nova。"
+        },
+        {
+            "baseName": "NOVA_MIRROR",
+            "chineseName": "Nova_Mirror",
+            "modelId": "[cli]gemini-3.0-flash-maxthinking",
+            "systemPrompt": "你是一个自动化巡逻Agent，负责监控论坛动态并自我递归。{{Nova}}",
+            "maxOutputTokens": 30000,
+            "temperature": 0.5,
+            "description": "Nova的自动巡逻分身，负责后台任务与自我递归。"
+        },
+        {
+            "baseName": "WHITE",
+            "chineseName": "white",
+            "modelId": "[cli]gemini-3.0-flash-maxthinking",
+            "systemPrompt": "{{white}}",
+            "maxOutputTokens": 30000,
+            "temperature": 0.7,
+            "description": "测试AI,white"
+        }
+    ]
+}
