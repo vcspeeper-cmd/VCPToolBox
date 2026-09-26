@@ -150,49 +150,14 @@ class SqliteHealthManager {
      * 该路径只用于低频 Rust 派生写屏障；普通 JS 写和手工健康检查仍复用现有连接。
      */
     reopenAndAssertHealthy(reason = 'rust-write-barrier') {
-        if (!this.dbPath || this.recovering) return false;
-
-        this.recovering = true;
-        this.state = 'recovering';
-        const oldDb = this.db;
-
-        try {
-            const reopened = new this.Database(this.dbPath);
-            try {
-                this.configureConnection(reopened);
-                this.checkpoint(reopened);
-                this.assertIntegrity(reopened);
-            } catch (error) {
-                // 候选连接未通过验证时，旧连接仍保持存活，确保调用方仍有
-                // 可用连接且 better-sqlite3 的 nRef 不出现人为归零窗口。
-                try { reopened.close(); } catch (_) {}
-                throw error;
-            }
-
-            // 验证全部通过后才发布候选连接；发布回调同步重绑所有已知消费者。
-            this._publishConnection(reopened);
-            try {
-                oldDb?.close();
-            } catch (closeError) {
-                console.warn(
-                    `[${this.logPrefix}] ⚠️ Failed to close superseded SQLite connection cleanly: ` +
-                    closeError.message
-                );
-            }
-            this.state = 'healthy';
-            this.corruptionDetected = false;
-            return true;
-        } catch (error) {
-            console.warn(
-                `[${this.logPrefix}] 🩺 Fresh SQLite connection verification failed after ${reason}: ` +
-                `${error.message || error}. Retrying with second-stage reopen...`
-            );
-            this.state = 'suspect';
-            this.recovering = false;
-            return this.recoverSuspectConnection(reason, error);
-        } finally {
-            this.recovering = false;
-        }
+        // ⚠️ 不再物理重开 better-sqlite3 连接。实测证实（better-sqlite3 12.4.1）：
+        // 任意连接的 close() 都会无条件删除 -shm/-wal（即使同 runtime 的其他
+        // 连接仍存活；readonly 连接同样无法阻止）。而 Rust rusqlite keepalive
+        // 与 riverMemoWorker worker 的 -shm mmap 无法感知该删除，下次访问
+        // 即触发 walFindFrame SIGBUS（历史全部崩溃点）。
+        // 改为在同一连接上执行 PASSIVE checkpoint + quick_check 完成写后验收；
+        // Rust 侧写入的新帧经 WAL 协议的 mxFrame 检测自动可见，无需物理重连。
+        return this.checkpointAndAssertHealthy(reason);
     }
 
     recoverSuspectConnection(reason, firstError) {
