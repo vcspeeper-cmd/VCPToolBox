@@ -43,6 +43,9 @@ function openDatabase(nextDbPath) {
         timeout: 30_000
     });
     db.pragma('query_only = ON');
+    // 与 Rust rusqlite 共享同一 knowledge_base.sqlite 的 WAL：关闭 mmap，
+    // 避免 Rust 侧 checkpoint 截断 WAL 时本连接已映射视图失效触发 SIGBUS。
+    db.pragma('mmap_size = 0');
 }
 
 function loadArtifactRow(artifactSig) {

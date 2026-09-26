@@ -14,7 +14,12 @@ class SqliteHealthManager {
         // PASSIVE checkpoint 是保守防线；根本防线是 rusqlite keepalive 与
         // better-sqlite3 候选连接提交共同保证两个 SQLite runtime 的读写
         // 连接引用在运行期不因“先关后开”而归零。
-        this.checkpointMode = this.platform === 'darwin' ? 'PASSIVE' : 'TRUNCATE';
+        // 双 SQLite runtime（Node better-sqlite3 + Rust rusqlite）是 VCP 的跨平台架构，
+        // 并非 Darwin 专属：TRUNCATE checkpoint 会截断 WAL 文件，导致另一 runtime
+        // 已映射的 WAL/-shm 页面失效，在 walFindFrame 触发不可恢复的 SIGBUS
+        // （POSIX mmap 语义在 Linux/macOS 上一致）。因此全平台统一使用 PASSIVE
+        // checkpoint——只回写 WAL 不截断文件，避免 mmap 视图失效。
+        this.checkpointMode = 'PASSIVE';
         const configuredBusyTimeout = Number(options.busyTimeoutMs);
         this.busyTimeoutMs = Number.isFinite(configuredBusyTimeout)
             ? Math.max(0, Math.floor(configuredBusyTimeout))
@@ -30,11 +35,12 @@ class SqliteHealthManager {
         db.pragma('journal_mode = WAL');
         db.pragma('synchronous = NORMAL');
         db.pragma('foreign_keys = ON');
-        if (this.platform === 'darwin') {
-            // 只关闭主数据库文件的可选 mmap。WAL-index/SHM 仍由 SQLite
-            // 按协议管理；该设置不能替代两套 runtime 的 nRef 生命周期保护。
-            db.pragma('mmap_size = 0');
-        }
+        // 全平台关闭主数据库文件的可选 mmap：Linux 上 Rust rusqlite 与
+        // better-sqlite3 共享同一 knowledge_base.sqlite 的 WAL，Rust 侧
+        // checkpoint/写 WAL 时 Node 侧已映射视图会失效并触发 SIGBUS。
+        // WAL-index/SHM 仍由 SQLite 按协议管理；该设置不能替代两套 runtime
+        // 的 nRef 生命周期保护。
+        db.pragma('mmap_size = 0');
         // SQLite 同一时刻只有一个写者。Rust/rusqlite、管理维护脚本或其他
         // better-sqlite3 连接短暂持锁时，在原生层等待锁释放，而不是立即把
         // 瞬态写竞争上抛成文件摄取失败。该配置属于连接级 PRAGMA，因此每次

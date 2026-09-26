@@ -783,7 +783,7 @@ grep "POST /v1/chat" ~/.pm2/logs/vcptoolbox-out.log | wc -l
    - POSIX `fcntl` 锁按进程记录，不同 bundled runtime 无法可靠识别同进程另一
      runtime 持有的 DMS 锁。
    - readwrite first-attach 可能缩短并重建 `-shm`；另一 runtime 若仍映射旧长度，
-     macOS 会直接产生不可恢复的 `SIGBUS`。
+     macOS/Linux 会直接产生不可恢复的 `SIGBUS`（POSIX mmap 语义一致）。
    - 主服务通过 Rust 常驻 keepalive 与 JavaScript 候选连接“先验证、后发布、
      再关闭旧连接”共同维持运行期连接引用，任何绕过该纪律的新直连入口都必须审计。
 
