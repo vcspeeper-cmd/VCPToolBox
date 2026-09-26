@@ -3226,6 +3226,16 @@ class TagMemoEngine {
     }
 
     async _withRustWriteLease(owner, fn, options = {}) {
+        // 🛡️ SIGBUS 止血开关：禁用所有 Rust 派生写（pairwise/residual/matrix）。
+        // 根因：同进程双 SQLite runtime（Node better-sqlite3 + Rust rusqlite）共享
+        // knowledge_base.sqlite WAL，POSIX fcntl 锁为进程级互不可见；Rust 任何
+        // readwrite 打开都会 ftruncate 重建 wal-index(-shm)，破坏 Node 主连接 mmap，
+        // 下次读大字段即 walFindFrame SIGBUS。临时禁用派生写，沿用 warm start
+        // 已加载的既有缓存（518050 pairs 等），服务保持稳定。待上游根治后移除。
+        if (String(process.env.KNOWLEDGEBASE_RUST_WRITES_DISABLED || '').toLowerCase() === 'true') {
+            console.warn(`[TagMemoEngine] 🛑 Rust derived writes DISABLED by KNOWLEDGEBASE_RUST_WRITES_DISABLED; skipping "${owner}".`);
+            return null;
+        }
         if (!this.knowledgeBaseManager || typeof this.knowledgeBaseManager.requestRustWriteLease !== 'function') {
             return await fn();
         }
