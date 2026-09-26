@@ -161,55 +161,38 @@ class SqliteHealthManager {
     }
 
     recoverSuspectConnection(reason, firstError) {
+        // ⚠️ 与 reopenAndAssertHealthy 同理：不再物理重连。better-sqlite3
+        // 任意 readwrite 连接 close() 都会无条件删除 -shm/-wal，使 Rust
+        // keepalive 与 riverMemoWorker 的 -shm mmap 失效触发 SIGBUS。
+        // suspect 状态下仅在同一连接上重试 checkpoint + quick_check；
+        // 仍失败则保持连接存活（宁可继续可用，也不因重连删 -shm 崩溃）。
         if (!this.dbPath || this.recovering) return false;
 
         this.recovering = true;
         this.state = 'recovering';
-        const oldDb = this.db;
-        let reopened = null;
 
         try {
             console.warn(
                 `[${this.logPrefix}] 🩺 SQLite suspect state after ${reason}; ` +
-                'reopening connection for second-stage verification...'
+                'retrying checkpoint + quick_check on the same connection (no reopen)...'
             );
 
-            reopened = new this.Database(this.dbPath);
-            this.configureConnection(reopened);
-            this.checkpoint(reopened);
-            this.assertIntegrity(reopened);
-
-            // 二阶段候选也必须先验证、再发布；失败时旧连接仍未关闭。
-            this._publishConnection(reopened);
-            reopened = null;
-            try {
-                oldDb?.close();
-            } catch (closeError) {
+            const healthy = this.checkpointAndAssertHealthy(`retry-after-${reason}`);
+            if (healthy) {
+                this.state = 'healthy';
+                this.corruptionDetected = false;
                 console.warn(
-                    `[${this.logPrefix}] ⚠️ Failed to close superseded suspect SQLite connection cleanly: ` +
-                    closeError.message
+                    `[${this.logPrefix}] ✅ SQLite suspect recovered on same-connection retry after ${reason}; ` +
+                    'treating as transient WAL/SHM view issue.'
                 );
+                return true;
             }
-            this.state = 'healthy';
-            this.corruptionDetected = false;
+
+            // 仍失败：保持 suspect，不 close 不重连（避免删 -shm 导致 SIGBUS）。
             console.warn(
-                `[${this.logPrefix}] ✅ SQLite suspect verification passed after reopen; ` +
-                'treating as transient WAL/SHM view issue.'
+                `[${this.logPrefix}] 🩺 SQLite still suspect after ${reason}; ` +
+                'keeping the live connection (physical reopen would delete -shm and crash the other SQLite runtime).'
             );
-            return true;
-        } catch (secondError) {
-            try { reopened?.close(); } catch (_) {}
-            console.error(
-                `[${this.logPrefix}] 🚨 SQLite second-stage verification failed after ${reason}: ` +
-                `${secondError.message || secondError}`
-            );
-            console.error(
-                `[${this.logPrefix}] First-stage failure was: ${firstError?.message || firstError}`
-            );
-            // 保留仍可能维持 SQLite runtime 映射的旧连接；业务层进入 corrupt
-            // 状态后应停止继续使用数据库，而不是主动制造最后关闭窗口。
-            this.state = 'corrupt';
-            this.corruptionDetected = true;
             return false;
         } finally {
             this.recovering = false;
