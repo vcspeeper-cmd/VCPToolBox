@@ -3202,6 +3202,11 @@ class TagMemoEngine {
 
     _assertHealthyAfterRustWrite(tag) {
         const reason = `Rust write "${tag}"`;
+        // Rust 写串行化窗口内主连接已关闭：阶段屏障跳过，最终检查
+        // 由 _withRustWriteLease 在重开连接后统一执行。
+        if (this.knowledgeBaseManager && !this.knowledgeBaseManager.db) {
+            return true;
+        }
         if (
             this.knowledgeBaseManager
             && typeof this.knowledgeBaseManager.reopenAndAssertDatabaseHealthy === 'function'
@@ -3232,7 +3237,12 @@ class TagMemoEngine {
         }
 
         try {
+            // 🛡️ SIGBUS 串行化：Rust 写窗口内关闭 Node 主连接（释放 -shm mmap），
+            // 避免 Rust readwrite 打开时 ftruncate 重建 wal-index 破坏 mmap 视图。
+            this.knowledgeBaseManager._closeDatabaseForRustWrite(owner);
             const result = await fn();
+            // Rust 写完成后立即重开主连接，恢复 JS 读写能力。
+            this.knowledgeBaseManager._reopenDatabaseAfterRustWrite(owner);
             // 复合流水线可在每次 Rust 写后自行执行屏障，避免租约尾部再次
             // 重开连接并重复 TRUNCATE + quick_check。
             if (options.skipFinalHealthCheck !== true) {
@@ -3244,6 +3254,14 @@ class TagMemoEngine {
             }
             return result;
         } finally {
+            // 即使 fn 抛错/租约异常也要保证主连接重开，避免服务进入无 db 状态。
+            try {
+                if (this.knowledgeBaseManager && !this.knowledgeBaseManager.db) {
+                    this.knowledgeBaseManager._reopenDatabaseAfterRustWrite(`${owner}-finally`);
+                }
+            } catch (reopenError) {
+                console.error(`[TagMemoEngine] 🚨 Failed to reopen database in lease finally for "${owner}": ${reopenError?.message || reopenError}`);
+            }
             lease.release();
         }
     }
@@ -3271,7 +3289,7 @@ class TagMemoEngine {
         const run = async () => {
             console.log(`[TagMemoEngine] ⚡ V8.2 Triggering Rust pairwise similarity precomputation (model_sig=${this.modelSig}, fullRebuild=${fullRebuild})...`);
             try {
-                const dbPath = path.join(path.dirname(this.db.name), 'knowledge_base.sqlite');
+                const dbPath = this.knowledgeBaseManager?.dbPath || path.join(path.dirname(this.db?.name || ''), 'knowledge_base.sqlite');
                 const result = await this.tagIndex.computePairwiseSimilarities(
                     dbPath,
                     this.modelSig,
@@ -3665,10 +3683,8 @@ class TagMemoEngine {
                         'Native rebuildMemoArtifact ABI is unavailable; rebuild rust-vexus-lite'
                     );
                 }
-                const dbPath = path.join(
-                    path.dirname(this.db.name),
-                    'knowledge_base.sqlite'
-                );
+                const dbPath = this.knowledgeBaseManager?.dbPath
+                    || path.join(path.dirname(this.db?.name || ''), 'knowledge_base.sqlite');
                 const kbConfig = JSON.parse(JSON.stringify(
                     this.ragParams?.KnowledgeBaseManager || {}
                 ));
@@ -3873,7 +3889,7 @@ class TagMemoEngine {
                 `(config=${effectiveConfigJson}, model_sig=${this.modelSig})...`
             );
             try {
-                const dbPath = path.join(path.dirname(this.db.name), 'knowledge_base.sqlite');
+                const dbPath = this.knowledgeBaseManager?.dbPath || path.join(path.dirname(this.db?.name || ''), 'knowledge_base.sqlite');
                 const result = await this.tagIndex.computeIntrinsicResiduals(
                     dbPath,
                     effectiveConfig.maxBasis,
@@ -3906,16 +3922,16 @@ class TagMemoEngine {
 
         // 独立调用仍完整执行“Rust 计算 → 新连接健康屏障 → 单次加载”；
         // 复合矩阵流水线则由调用方在阶段边界执行同一序列。
-        return await this._withRustWriteLease('tagmemo:intrinsic-residuals', async () => {
-            const result = await run();
-            if (!result) return null;
-            if (!this._assertHealthyAfterRustWrite('intrinsic-residuals load barrier')) return null;
-            this.loadIntrinsicResiduals({ failOnCorruption: true });
-            return result;
+        const residualResult = await this._withRustWriteLease('tagmemo:intrinsic-residuals', async () => {
+            return await run();
         }, {
             pendingThreshold: 0,
             skipFinalHealthCheck: true
         });
+        // Rust 写完成、主连接重开后再执行阶段屏障与内存加载。
+        if (residualResult && !this._assertHealthyAfterRustWrite('intrinsic-residuals load barrier')) return null;
+        if (residualResult) this.loadIntrinsicResiduals({ failOnCorruption: true });
+        return residualResult;
     }
 
     schedulePostStartupDerivedRefresh(delayMs = 300000) {

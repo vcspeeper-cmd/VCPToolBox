@@ -748,6 +748,31 @@ class KnowledgeBaseManager {
         }
     }
 
+    /**
+     * 🛡️ Rust 派生写租约串行化（walFindFrame SIGBUS 根治）：
+     * Rust 以 readwrite 打开 knowledge_base.sqlite 时会 ftruncate 重建
+     * wal-index(-shm)，破坏同进程 better-sqlite3 主连接的 mmap 视图，
+     * 下次读 wal-index 即 SIGBUS。因此在 Rust 写窗口内先关闭主连接
+     * （释放 mmap），Rust 写完成后再重开。
+     */
+    _closeDatabaseForRustWrite(reason = 'rust-write-serialization') {
+        if (!this.db) return;
+        try {
+            this.db.close();
+        } catch (error) {
+            console.warn(`[KnowledgeBase] ⚠️ close better-sqlite3 for Rust write failed (${reason}): ${error?.message || error}`);
+        }
+        this.db = null;
+    }
+
+    _reopenDatabaseAfterRustWrite(reason = 'rust-write-serialization') {
+        if (this.db) return this.db;
+        this.db = this._openDatabaseWithRecovery(this.dbPath);
+        this._rebindDatabaseConnection(this.db);
+        console.log(`[KnowledgeBase] 🔄 Reopened better-sqlite3 connection after ${reason}`);
+        return this.db;
+    }
+
     _recoverSuspectDatabaseConnection(reason, firstError) {
         this.sqliteHealthManager.syncFromOwner(this);
         const recovered = this.sqliteHealthManager.recoverSuspectConnection(reason, firstError);

@@ -14,7 +14,12 @@ class SqliteHealthManager {
         // PASSIVE checkpoint 是保守防线；根本防线是 rusqlite keepalive 与
         // better-sqlite3 候选连接提交共同保证两个 SQLite runtime 的读写
         // 连接引用在运行期不因“先关后开”而归零。
-        this.checkpointMode = this.platform === 'darwin' ? 'PASSIVE' : 'TRUNCATE';
+        // Linux 上 Rust rusqlite 与 better-sqlite3 双 SQLite runtime 共享同一
+        // knowledge_base.sqlite：TRUNCATE checkpoint 会截断 WAL 文件，导致另一
+        // runtime 已 mmap 的 WAL/-shm 页面失效，在 walFindFrame 触发不可恢复的
+        // SIGBUS（与 macOS 同因）。因此全平台统一使用 PASSIVE checkpoint——
+        // PASSIVE 只回写 WAL 不截断文件，避免 mmap 视图失效。
+        this.checkpointMode = 'PASSIVE';
         const configuredBusyTimeout = Number(options.busyTimeoutMs);
         this.busyTimeoutMs = Number.isFinite(configuredBusyTimeout)
             ? Math.max(0, Math.floor(configuredBusyTimeout))
@@ -30,11 +35,17 @@ class SqliteHealthManager {
         db.pragma('journal_mode = WAL');
         db.pragma('synchronous = NORMAL');
         db.pragma('foreign_keys = ON');
-        if (this.platform === 'darwin') {
-            // 只关闭主数据库文件的可选 mmap。WAL-index/SHM 仍由 SQLite
-            // 按协议管理；该设置不能替代两套 runtime 的 nRef 生命周期保护。
-            db.pragma('mmap_size = 0');
-        }
+        // Linux 上 Rust rusqlite 与 better-sqlite3 双 SQLite runtime 共享同一
+        // knowledge_base.sqlite 的 WAL：Rust 侧 checkpoint/写 WAL 时，Node 侧
+        // 已映射的 WAL 视图会失效，SQLite 在 walFindFrame 触发不可恢复的 SIGBUS。
+        // 因此全平台关闭主数据库文件的可选 mmap（该设置不能替代两套 runtime 的
+        // nRef 生命周期保护，WAL-index/SHM 仍由 SQLite 按协议管理）。
+        db.pragma('mmap_size = 0');
+        // 双 SQLite runtime 各自默认在 WAL 达 1000 页时自动 checkpoint（wal_autocheckpoint），
+        // 任一方触发都会修改/重建 wal-index(-shm)，导致另一 runtime 已 mmap 的视图失效，
+        // 在 walFindFrame 触发 SIGBUS。禁用两边的自动 checkpoint，改由 JS coordinator
+        // 在低频屏障中显式执行 PASSIVE checkpoint（只回写不截断），消除周期踩踏。
+        db.pragma('wal_autocheckpoint = 0');
         // SQLite 同一时刻只有一个写者。Rust/rusqlite、管理维护脚本或其他
         // better-sqlite3 连接短暂持锁时，在原生层等待锁释放，而不是立即把
         // 瞬态写竞争上抛成文件摄取失败。该配置属于连接级 PRAGMA，因此每次
@@ -139,101 +150,49 @@ class SqliteHealthManager {
      * 该路径只用于低频 Rust 派生写屏障；普通 JS 写和手工健康检查仍复用现有连接。
      */
     reopenAndAssertHealthy(reason = 'rust-write-barrier') {
-        if (!this.dbPath || this.recovering) return false;
-
-        this.recovering = true;
-        this.state = 'recovering';
-        const oldDb = this.db;
-
-        try {
-            const reopened = new this.Database(this.dbPath);
-            try {
-                this.configureConnection(reopened);
-                this.checkpoint(reopened);
-                this.assertIntegrity(reopened);
-            } catch (error) {
-                // 候选连接未通过验证时，旧连接仍保持存活，确保调用方仍有
-                // 可用连接且 better-sqlite3 的 nRef 不出现人为归零窗口。
-                try { reopened.close(); } catch (_) {}
-                throw error;
-            }
-
-            // 验证全部通过后才发布候选连接；发布回调同步重绑所有已知消费者。
-            this._publishConnection(reopened);
-            try {
-                oldDb?.close();
-            } catch (closeError) {
-                console.warn(
-                    `[${this.logPrefix}] ⚠️ Failed to close superseded SQLite connection cleanly: ` +
-                    closeError.message
-                );
-            }
-            this.state = 'healthy';
-            this.corruptionDetected = false;
-            return true;
-        } catch (error) {
-            console.warn(
-                `[${this.logPrefix}] 🩺 Fresh SQLite connection verification failed after ${reason}: ` +
-                `${error.message || error}. Retrying with second-stage reopen...`
-            );
-            this.state = 'suspect';
-            this.recovering = false;
-            return this.recoverSuspectConnection(reason, error);
-        } finally {
-            this.recovering = false;
-        }
+        // ⚠️ 不再物理重开 better-sqlite3 连接。实测证实（better-sqlite3 12.4.1）：
+        // 任意连接的 close() 都会无条件删除 -shm/-wal（即使同 runtime 的其他
+        // 连接仍存活；readonly 连接同样无法阻止）。而 Rust rusqlite keepalive
+        // 与 riverMemoWorker worker 的 -shm mmap 无法感知该删除，下次访问
+        // 即触发 walFindFrame SIGBUS（历史全部崩溃点）。
+        // 改为在同一连接上执行 PASSIVE checkpoint + quick_check 完成写后验收；
+        // Rust 侧写入的新帧经 WAL 协议的 mxFrame 检测自动可见，无需物理重连。
+        return this.checkpointAndAssertHealthy(reason);
     }
 
     recoverSuspectConnection(reason, firstError) {
+        // ⚠️ 与 reopenAndAssertHealthy 同理：不再物理重连。better-sqlite3
+        // 任意连接 close() 都会无条件删除 -shm/-wal（readonly 亦如此），
+        // 使 Rust keepalive 与 riverMemoWorker 的 -shm mmap 失效触发 SIGBUS。
+        // suspect 状态下仅在同一连接上重试 checkpoint + quick_check；
+        // 仍失败则保持连接存活（宁可继续可用，也不因重连删 -shm 崩溃）。
         if (!this.dbPath || this.recovering) return false;
 
         this.recovering = true;
         this.state = 'recovering';
-        const oldDb = this.db;
-        let reopened = null;
 
         try {
             console.warn(
                 `[${this.logPrefix}] 🩺 SQLite suspect state after ${reason}; ` +
-                'reopening connection for second-stage verification...'
+                'retrying checkpoint + quick_check on the same connection (no reopen)...'
             );
 
-            reopened = new this.Database(this.dbPath);
-            this.configureConnection(reopened);
-            this.checkpoint(reopened);
-            this.assertIntegrity(reopened);
-
-            // 二阶段候选也必须先验证、再发布；失败时旧连接仍未关闭。
-            this._publishConnection(reopened);
-            reopened = null;
-            try {
-                oldDb?.close();
-            } catch (closeError) {
+            const healthy = this.checkpointAndAssertHealthy(`retry-after-${reason}`);
+            if (healthy) {
+                this.state = 'healthy';
+                this.corruptionDetected = false;
                 console.warn(
-                    `[${this.logPrefix}] ⚠️ Failed to close superseded suspect SQLite connection cleanly: ` +
-                    closeError.message
+                    `[${this.logPrefix}] ✅ SQLite suspect recovered on same-connection retry after ${reason}; ` +
+                    'treating as transient WAL/SHM view issue.'
                 );
+                return true;
             }
-            this.state = 'healthy';
-            this.corruptionDetected = false;
+
+            // 仍失败：保持 suspect，不 close 不重连（避免删 -shm 导致 SIGBUS）。
             console.warn(
-                `[${this.logPrefix}] ✅ SQLite suspect verification passed after reopen; ` +
-                'treating as transient WAL/SHM view issue.'
+                `[${this.logPrefix}] 🩺 SQLite still suspect after ${reason}; ` +
+                'keeping the live connection (physical reopen would delete -shm and crash the other SQLite runtime).'
             );
-            return true;
-        } catch (secondError) {
-            try { reopened?.close(); } catch (_) {}
-            console.error(
-                `[${this.logPrefix}] 🚨 SQLite second-stage verification failed after ${reason}: ` +
-                `${secondError.message || secondError}`
-            );
-            console.error(
-                `[${this.logPrefix}] First-stage failure was: ${firstError?.message || firstError}`
-            );
-            // 保留仍可能维持 SQLite runtime 映射的旧连接；业务层进入 corrupt
-            // 状态后应停止继续使用数据库，而不是主动制造最后关闭窗口。
-            this.state = 'corrupt';
-            this.corruptionDetected = true;
             return false;
         } finally {
             this.recovering = false;
