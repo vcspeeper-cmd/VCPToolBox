@@ -1442,6 +1442,10 @@ fn configure_sqlite_connection(conn: &Connection, readonly: bool) -> rusqlite::R
     conn.busy_timeout(Duration::from_secs(30))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "query_only", if readonly { "ON" } else { "OFF" })?;
+    // 双 SQLite runtime（Node better-sqlite3 + Rust rusqlite）共享同一 WAL：
+    // 禁用自动 checkpoint（默认 1000 页触发），避免任一方在另一 runtime 的
+    // wal-index(-shm) mmap 视图存活时修改/重建它，导致 walFindFrame SIGBUS。
+    conn.pragma_update(None, "wal_autocheckpoint", "0")?;
     Ok(())
 }
 

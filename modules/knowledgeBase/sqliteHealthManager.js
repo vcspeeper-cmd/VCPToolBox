@@ -41,6 +41,11 @@ class SqliteHealthManager {
         // WAL-index/SHM 仍由 SQLite 按协议管理；该设置不能替代两套 runtime
         // 的 nRef 生命周期保护。
         db.pragma('mmap_size = 0');
+        // 双 SQLite runtime 各自默认在 WAL 达 1000 页时自动 checkpoint（wal_autocheckpoint），
+        // 任一方触发都会修改/重建 wal-index(-shm)，导致另一 runtime 已 mmap 的视图失效，
+        // 在 walFindFrame 触发 SIGBUS。禁用两边的自动 checkpoint，改由 JS coordinator
+        // 在低频屏障中显式执行 PASSIVE checkpoint（只回写不截断），消除周期踩踏。
+        db.pragma('wal_autocheckpoint = 0');
         // SQLite 同一时刻只有一个写者。Rust/rusqlite、管理维护脚本或其他
         // better-sqlite3 连接短暂持锁时，在原生层等待锁释放，而不是立即把
         // 瞬态写竞争上抛成文件摄取失败。该配置属于连接级 PRAGMA，因此每次
