@@ -1363,8 +1363,11 @@ class KnowledgeBaseManager {
             throw error;
         }
 
+        // SIGBUS 根治后 Rust RW 写被禁用，matrix rebuild 无法落库；
+        // 这里放开 buildIfMissing，让 V10 引擎走 JS 侧 buildArtifact +
+        // persistReady(Node 主连接写库) 的安全重建路径，避免 MEMO_ARTIFACT_UNAVAILABLE。
         const artifact = this.tagMemoV10Engine.getArtifactSnapshot({
-            buildIfMissing: false
+            buildIfMissing: true
         });
         if (!artifact?.artifactSig) {
             const error = new Error('Unified native Memo artifact is unavailable');
