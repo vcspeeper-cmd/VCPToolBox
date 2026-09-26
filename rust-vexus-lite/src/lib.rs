@@ -1471,6 +1471,11 @@ static SQLITE_KEEPALIVES: LazyLock<Mutex<std::collections::HashMap<String, Conne
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 fn open_sqlite_readwrite_inner(db_path: &str) -> rusqlite::Result<Connection> {
+    if std::env::var("KNOWLEDGEBASE_RUST_WRITES_DISABLED").map(|v| v.eq_ignore_ascii_case("true") || v == "1").unwrap_or(false) {
+        return Err(rusqlite::Error::InvalidParameterName(
+            "Rust RW SQLite access disabled by KNOWLEDGEBASE_RUST_WRITES_DISABLED".into()
+        ));
+    }
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     configure_sqlite_connection(&conn, false)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;

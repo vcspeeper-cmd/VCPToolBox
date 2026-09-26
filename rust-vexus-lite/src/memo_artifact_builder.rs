@@ -90,6 +90,9 @@ fn open_readonly(path: &str) -> std::result::Result<Connection, String> {
 }
 
 fn open_readwrite(path: &str) -> std::result::Result<Connection, String> {
+    if std::env::var("KNOWLEDGEBASE_RUST_WRITES_DISABLED").map(|v| v.eq_ignore_ascii_case("true") || v == "1").unwrap_or(false) {
+        return Err("Rust artifact RW write disabled by KNOWLEDGEBASE_RUST_WRITES_DISABLED".to_string());
+    }
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
         .map_err(|error| format!("open readwrite SQLite failed: {}", error))?;
     connection
