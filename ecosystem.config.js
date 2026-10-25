@@ -37,7 +37,11 @@ module.exports = {
       wait_ready: false,
       restart_delay: 5000,
       env: {
-        NODE_ENV: 'production'
+        NODE_ENV: 'production',
+        // adminServer 监听 6007，但内部代理必须指向主服务 6005。
+        // 不能依赖 PM2 遗留的 PORT=6006，否则 RAG/日记接口会 502。
+        VCP_MAIN_PORT: '6005',
+        ADMIN_PORT: '6007'
       }
     }
   ]

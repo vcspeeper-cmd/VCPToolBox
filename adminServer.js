@@ -12,8 +12,11 @@ const http = require("http");
 const basicAuth = require("basic-auth");
 const cors = require("cors");
 
-const MAIN_PORT = parseInt(process.env.PORT) || 3000;
-const ADMIN_PORT = MAIN_PORT + 1;
+// 主服务端口与面板监听端口解耦：旧 PM2 环境可能残留 PORT=6006，
+// 不能再用 PORT+1 推导，否则面板会把 6006 当成主服务并代理失败。
+const RUNTIME_PORT = parseInt(process.env.PORT, 10) || 3000;
+const MAIN_PORT = parseInt(process.env.VCP_MAIN_PORT, 10) || RUNTIME_PORT;
+const ADMIN_PORT = parseInt(process.env.ADMIN_PORT, 10) || RUNTIME_PORT + 1;
 const DEBUG_MODE = (process.env.DebugMode || "False").toLowerCase() === "true";
 
 const ADMIN_USERNAME = process.env.AdminUsername;
